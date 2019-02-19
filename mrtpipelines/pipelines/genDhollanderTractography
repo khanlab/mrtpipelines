@@ -38,6 +38,9 @@ def get_parser():
 
     # Optional arguments
     g_opt = parser.add_argument_group("Optional arguments")
+    g_opt.add_argument("-m", "--mask", dest="brainmask", default=None,
+                                       help="User provided brainmask (provide "
+                                            "full path)")
     g_opt.add_argument("-N", "--select", dest="select", default=25000,
                                          help="Number of streamlines to "
                                               "generate for each subject. "
@@ -54,6 +57,20 @@ def get_parser():
                                        help="maximum harmonic degree(s) for "
                                             "response function estimation "
                                             "(eg. --lmax 0 8 8)")
+    g_opt.add_argument("-ss", "--single-shell", dest="sshell", default=False,
+                                                action='store_true',
+                                                help="Processing for "
+                                                "single shell tissue")
+    g_opt.add_argument("-nr", "--noreorientation", dest="noreorient",
+                                                   default=False,
+                                                   action='store_true',
+                                                   help='Turn off FOD '
+                                                   'reorientation during '
+                                                   'registration.')
+    g_opt.add_argument("-r", "--resample", dest="resample", default=None,
+                                           type=float,
+                                           help="Resample to isotropic "
+                                                "resolution in mm")
     g_opt.add_argument("-w", "--work_dir", dest="work_dir",
                                            help="Work directory. Defaults to "
                                             "<bids_dir>/derivatives/scratch")
@@ -75,7 +92,7 @@ def main():
     import os
     import os.path as op
 
-    from bids.grabbids import BIDSLayout
+    from bids.layout import BIDSLayout
 
     from nipype import config, logging
     from nipype.pipeline import engine as pe
@@ -87,14 +104,21 @@ def main():
 
     # Required inputs
     bids_dir = args.bids_dir
-    deriv_dir = op.join(op.realpath(bids_dir), "derivatives")
-    subjid = args.participant_label
-    shells = args.shells
-    lmax = args.lmax
     temp_dir = op.realpath(args.template_dir)
     temp_label = args.template_label
+    subjid = args.participant_label
+
+    # Optional inputs
+    shells = args.shells
+    lmax = args.lmax
     nfibers = int(args.select)
     nthreads = int(args.nthreads)
+    bmask = args.brainmask
+    sshell = args.sshell
+    noreorient = args.noreorient
+    resample = args.resample
+
+    deriv_dir = op.join(op.realpath(bids_dir), "derivatives")
 
     # Set work & crash directories
     if args.work_dir:
@@ -127,11 +151,14 @@ def main():
     # Create necessary nodes not part of existing workflows
     # BIDSDataGrabber
     layout = BIDSLayout(deriv_dir)
-    BIDSDataGrabber = io.getBIDS(layout=layout, subj=subjid, wdir=work_dir,
-                                 nthreads=nthreads)
+    BIDSDataGrabber = io.getBIDS(layout=layout, subj=subjid, bmask=bmask,
+                                 wdir=work_dir, nthreads=nthreads)
 
     # MRTrix preprocessing workflow
     dholl_preproc_wf = preproc_wf.dholl_preproc_wf(shells=shells, lmax=lmax,
+                                                   sshell=sshell,
+                                                   noreorient=noreorient,
+                                                   resample=resample,
                                                    template_dir=temp_dir,
                                                    template_label=temp_label,
                                                    wdir=work_dir,
@@ -204,13 +231,13 @@ def main():
                 (BIDSDataGrabber, dholl_preproc_wf, [
                     ('nifti', 'dwiConvert.in_file'),
                     ('bdata', 'dwiConvert.grad_fsl'),
-                    ('bdata', 'dwi2response.grad_fsl'),
                     ('mask', 'maskConvert.in_file')]),
 
                 # Workflows
                 (dholl_preproc_wf, dholl_tract_wf, [
                     ('FODTransform.out_file', 'genTract.in_file'),
                     ('MaskTransform.out_file', 'genTract.seed_image'),
+                    ('MaskTransform.out_file', 'genTract.roi_mask'),
                     ('FODTransform.out_file', 'siftTract.in_fod')]),
 
                 # File rename
@@ -296,7 +323,7 @@ def main():
     pl.write_graph(graph2use='colored', format='svg')
 
     if nthreads >= 1:
-        pl.run(plugin='MultiProc')
+        pl.run(plugin='MultiProc', plugin_args={'n_procs': 1})
     else:
         pl.run(plugin='Linear')
 
